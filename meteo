@@ -1,0 +1,302 @@
+DATE="date courante : "
+echo -n $DATE; date
+
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/78.0.3904.108 Safari/537.36"
+#SITE="http://www.meteofrance.com/previsions-meteo-france/ville/code"
+
+
+initialisation() {
+	mkdir analyzed generated scraped villes
+	touch villes/villes.txt
+}
+
+downloadPage() {
+	getVilleCode $1
+
+	VILLE=${VILLE,,}
+
+	SITE="http://www.meteofrance.com/previsions-meteo-france/$VILLE/$CODE"
+	echo "$SITE"
+	DATE="`date +'%y%m%d'`"
+	if [ ! -f "scraped/$VILLE_$DATE.html" ] ; then
+		curl -A "$USER_AGENT" "$SITE" > "scraped/$VILLE_$DATE.html"
+		echo "Downloaded page successfully."
+	else
+		echo "Page already downloaded."
+	fi
+}
+
+downloadPageLocal() {
+	getVilleCode $1
+
+	VILLE=${VILLE,,}
+
+	SITE="http://localhost/www.meteofrance.com/previsions-meteo-france/$VILLE/$CODE"
+	echo "$SITE"
+	if [ ! -f "scraped/$VILLE.html" ] ; then
+		curl -A "$USER_AGENT" "$SITE" > "scraped/$VILLE.html"
+		echo "Downloaded page successfully."
+	else
+		echo "Page already downloaded."
+	fi
+}
+
+deleteDownload() {
+	rm -rf scraped
+	mkdir scraped
+	echo "Downloads deleted successfully."
+}
+
+deleteAnalyze() {
+	rm -rf analyzed
+	mkdir analyzed
+	echo "Analyzes deleted successfully."
+}
+
+
+analyzePage() {
+	if [ `ls scraped | wc -w` == 0 ] ; then
+		echo "Aucune page téléchargée"
+		exit
+	fi
+
+	for file in scraped/* ; do
+		ville="` echo $file | sed -n 's/.*\/\(.*\)\.html/\1/p' `"
+		if [ ! -d analyzed/"$ville" ] ; then
+			mkdir analyzed/"$ville"
+		fi
+	
+		# JOURS
+		FIRSTDAY=`echo $file | grep -o "[0-9]\{6\}"`
+
+		echo `date --date="$FIRSTDAY" +'%d:%m:%y'` `date --date="$FIRSTDAY" +'%d:%m:%Y'` `date --date="$FIRSTDAY" +'%d:%m'` `date --date="$FIRSTDAY" +'%d'` >  analyzed/"$ville"/data_jour.txt
+		for i in 1 2 3 4 5 6 7 ; do
+			echo `date --date="$FIRSTDAY $i day" +'%d:%m:%y'` `date --date="$FIRSTDAY $i day" +'%d:%m:%Y'` `date --date="$FIRSTDAY $i day" +'%d:%m'` `date --date="$FIRSTDAY $i day" +'%d'` >>  analyzed/"$ville"/data_jour.txt
+		done
+
+		grep -o "<span class=\"min-temp\">-*[0-9]\+°C Minimale<\/span>" < scraped/"$ville".html | grep -o "\-*[0-9]\+" > analyzed/"$ville"/data_temp_min.txt
+
+		grep -o "<span class=\"max-temp\">-*[0-9]\+°C Maximale<\/span>" < scraped/"$ville".html | grep -o "\-*[0-9]\+" > analyzed/"$ville"/data_temp_max.txt
+
+		# PREMIER JOUR
+		grep -o "<li class=\"active\" title=\"\([^\"]*\)\">" < scraped/"$ville".html | grep -o "title=\".*\"" | grep -o "\".*\"" | grep -o "[^\"]*" > analyzed/"$ville"/data_temp_label.txt
+
+		# TOUS LES JOURS SAUF PREMIER	
+		grep -o "<li title=\"\([^\"]*\)\">" < scraped/"$ville".html | grep -o "title=\".*\"" | grep -o "\".*\"" | grep -o "[^\"]*" >> analyzed/"$ville"/data_temp_label.txt
+
+		analyzePageConfVent
+
+	done
+}
+
+
+analyzePageConfVent() {
+	cat scraped/"$ville".html | grep -o "<ul class=\"prevision-horaire .* <\/ul>"  > ind_conf1.txt
+
+	sed 's/<\/ul> <ul class=\"prevision-horaire/<\/ul>\n<ul class=\"prevision-horaire/g' < ind_conf1.txt > ind_conf2.txt
+	
+	# ENLEVER TOMORROW
+	c=2
+	while grep "tomorrow" ind_conf"$c".txt  > /dev/null; do
+
+		d=`expr $c + 1`
+		sed 's/<li class=\" tomorrow \".*//' < ind_conf"$c".txt > ind_conf"$d".txt
+		c=$d
+	done
+	cat ind_conf"$c".txt > ind_conf.txt
+	for i in $(seq 1 $c) ; do
+		rm ind_conf"$i".txt
+	done
+	while read line ; do
+		echo "$line" | grep -o "<span class=\"picVent V_..\?.\?\"><\/span><\?.\?[0-9][0-9]\?[0-9]\? km/h" | sed 's/< 5/2/' | grep -o "[0-9][0-9]\?[0-9]\?" >> vent.txt
+		echo "$line" | grep -o "[0-5]\/5" | sed 's/\([0-9]\)\/5/\1/' >> conf.txt
+		echo "." >> conf.txt
+		echo "." >> vent.txt
+	done < ind_conf.txt
+
+	# MOYENNE
+	sum=0
+	nb=0
+	if [ -f analyzed/"$ville"/data_vent.txt ] ; then
+		rm analyzed/"$ville"/data_vent.txt
+	fi
+	if [ -f analyzed/"$ville"/data_conf.txt ] ; then
+		rm analyzed/"$ville"/data_conf.txt
+	fi
+	while read line ; do
+		if [ "$line" != "." ] ; then
+			sum=`expr $sum + $line`
+			nb=`expr $nb + 1`
+		else
+			echo `expr $sum / $nb` >> analyzed/"$ville"/data_vent.txt
+			sum=0
+			nb=0
+		fi
+	done < vent.txt
+
+	while read line ; do
+		if [ "$line" != "." ] ; then
+			sum=`expr $sum + $line`
+			nb=`expr $nb + 1`
+		else
+			if [ "$nb" != 0 ] ; then
+				echo `expr $sum / $nb` >> analyzed/"$ville"/data_conf.txt
+			else
+				echo "6" >> analyzed/"$ville"/data_conf.txt
+			fi
+			sum=0
+			nb=0
+		fi
+	done < conf.txt
+
+	if [ -f "conf.txt" ] ; then
+		rm conf.txt
+	fi
+	if [ -f "vent.txt" ] ; then
+		rm vent.txt
+	fi
+	if [ -f "ind_conf.txt" ] ; then
+		rm ind_conf.txt
+	fi
+}
+
+
+getVilleCode() {
+	ville="$1"
+	VILLE=${ville^^}
+	while read line ; do
+		for word in $line ; do
+			if [ "$word" == "$VILLE" ] ; then
+				VILLE=`echo $line | sed -n 's/ .*//p' `
+				CODE=`echo $line | grep -o "[0-9]\{5\}"`
+				return
+			fi
+		done
+	done < villes/villes.txt
+
+	curl -A "$USER_AGENT" "https://datanova.legroupe.laposte.fr/api/records/1.0/search/?dataset=laposte_hexasmal&q="$1"&lang=fr&rows=10&facet=nom_de_la_commune&facet=code_postal" > villes/"$VILLE".html
+
+
+	if [[ "$1" =~ ^[0-9]*$ ]] ; then
+		CODE="$ville"
+		VILLE=`grep -o "libell_d_acheminement\": \".*\", \"code_postal\": \"$CODE" < villes/"$VILLE".html | sed -n 's/.*acheminement\": \"\([^"]*\)\".*/\1/p' `
+	else
+		CODE=`grep -o "libell_d_acheminement\": \"$VILLE\", \"code_postal\": \"[0-9]\{5\}" < villes/$VILLE.html | tail -1 | sed -n 's/.*\([0-9]\{5\}\)/\1/p' `
+	fi
+	echo "$VILLE $CODE" >> villes/villes.txt
+}
+
+
+createWebPage() {
+	VILLE="$1"
+	if [[ "$1" =~ ^[0-9]*$ ]] ; then
+		getVilleCode $1
+	fi
+	VILLE=${VILLE,,}
+
+	echo "<!doctype html>
+		<html lang="fr">
+		<head>
+		  <meta charset="utf-8">
+		  <title>Meteo $1, $2</title>
+		  <style>
+			table, th, td {
+			border:1px solid black;
+			border-spacing:1px;
+			}
+		  </style>
+		</head>
+		<body>
+		<h1 align="center"> ${VILLE^} le $2 </h1>
+
+		<table cellpadding="10">
+		<tr>
+			<th> Analyse du </th>
+			<th> Minimale </th>
+			<th> Maximale </th>
+			<th> Climat </th>
+			<th> Vent </th>
+			<th> Confiance </th>
+		</tr>
+		" > "generated/$VILLE-$2.html"
+
+
+	for file in analyzed/"$VILLE"* ; do
+		c=4
+		while read line ; do
+			for word in $line ; do
+				if [ "$2" == "$word" ] ; then
+					DAY=`expr $c / 4`
+					break
+				fi
+				c=`expr $c + 1`
+			done
+		done < "$file"/data_jour.txt
+
+		if [ $c != 36 ] ; then
+		
+	echo "<tr>
+		<td>`head -1 "$file"/data_jour.txt | tail -1 | grep -o "^[^ ]*"`</td>
+		<td>`head -$DAY "$file"/data_temp_min.txt | tail -1`</td>
+		<td>`head -$DAY "$file"/data_temp_max.txt | tail -1`</td>
+		<td>`head -$DAY "$file"/data_temp_label.txt | tail -1`</td>
+		<td>`head -$DAY "$file"/data_vent.txt | tail -1`</td>
+		<td>`head -$DAY "$file"/data_conf.txt | tail -1`</td>
+	</tr>" >> "generated/$VILLE-$2.html"
+
+		else
+			echo "Date incorrecte ($file)"
+		fi
+	done
+	echo "</table><p> By Arthur Arnoux, ENSISA</p></body> </html> " >> "generated/$VILLE-$2.html"
+}
+
+triche() {
+	echo "Triche"
+	for file in analyzed/* ; do
+		actual=`echo $file | grep -o "^[^_]*"`
+		if [ "$globalActual" != "$actual" ] ; then
+			NEWDATE=`echo $file | grep -o "[0-9]*$"`
+			NEWDATE=`date --date "$NEWDATE $1 day" +"%y%m%d"`
+			NEWNAME=`echo $file | sed -n "s/[0-9]\{6\}/$NEWDATE/p" `
+			cp -r $file $NEWNAME
+			echo $NEWNAME
+		fi
+		globalActual=$actual
+	done
+}
+
+helpDisplay() {
+	echo "-i		Initialisation"
+	echo "-c		Effacement des téléchargement précédents"
+	echo "-e		Effacement des analyses précédentes"
+	echo "-m ville	Téléchargement de la page élaborée par météo France qui décrit la météo pour la ville donnée en paramètre"
+	echo "-s ville	Cette option marche comme m mais remplace l'URL officielle pour atteindre un site local qui héberge les pages précédemment téléchargées. Cette option simule un téléchargement réel."
+	echo "-a 		Analyse l'ensemble des fichiers préalablement téléchargés."
+	echo "-w ville jour	Fabrication de la page web qui portera le nom <<ville>>-<<jour>>.html. Cette page extrait de la base des données météo l'ensemble des entrées qui concerne la ville pour un jour donné et l'affiche sous une forme tabulaire."
+	echo "-t n		triche"
+	echo "-h		Affichage de cette aide." 
+}
+
+for i in $@; do
+	case $1 in
+	"-i") initialisation;;
+	"-m") downloadPage $2
+		shift;;
+	"-s") downloadPageLocal $2
+		shift;;
+	"-t") triche $2
+		shift;;
+	"-h") helpDisplay
+		exit;;
+	"-c") deleteDownload;;
+	"-a") analyzePage;;
+	"-e") deleteAnalyze;;
+	"-w") createWebPage $2 $3
+		shift
+		shift;;
+	esac
+	shift
+
+done
+
